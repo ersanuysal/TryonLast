@@ -1,23 +1,13 @@
 // app/api/tryon/route.ts
 import { NextResponse } from "next/server";
-import { fal } from "@fal-ai/client";
+import { put } from "@vercel/blob";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-/**
- * Bu sürüm Eachlabs Nano-Banana API’sine göre güncellendi.
- * Varsayılan PROVIDER artık "eachlabs".
- * Görselleri URL’e çevirmek için mevcut FAL storage uploader kullanılıyor.
- * (İstersen bunu Vercel Blob/S3 ile değiştirebilirsin.)
- */
-
 // ===== Genel Ayarlar =====
-const PROVIDER = (process.env.TRYON_PROVIDER || "eachlabs").toLowerCase(); // "eachlabs" | "fal" | "nanobanana"
-
-// FAL storage upload için gerekli olabilir (only if used as uploader)
-fal.config({ credentials: process.env.FAL_KEY || "" });
+const PROVIDER = (process.env.TRYON_PROVIDER || "eachlabs").toLowerCase(); // default: eachlabs
 
 // ===== Yardımcılar =====
 async function safeJson(res: Response) {
@@ -28,13 +18,11 @@ async function safeJson(res: Response) {
   }
 }
 
-// FAL storage'a dosya yükleyip erişilebilir URL döndürür (uploader olarak kullanıyoruz)
-async function uploadToFal(file: File | Blob, filename = "upload.png") {
-  const wrapped =
-    file instanceof File
-      ? file
-      : new File([file], filename, { type: (file as any).type || "image/png" });
-  return await fal.storage.upload(wrapped);
+// Vercel Blob'a yükleme (public URL döndürür)
+async function uploadPublicUrl(file: File | Blob, filename = "upload.png") {
+  const key = `uploads/${Date.now()}-${filename}`;
+  const { url } = await put(key, file as any, { access: "public" });
+  return url;
 }
 
 // ===== Route =====
@@ -49,7 +37,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing files" }, { status: 400 });
     }
 
-    // ========== 1) Eachlabs Nano-Banana (varsayılan) ==========
+    // ===== Eachlabs Nano-Banana =====
     if (PROVIDER === "eachlabs") {
       const EACHLABS_KEY = process.env.EACHLABS_KEY || "";
       const EACHLABS_URL = "https://api.eachlabs.ai/v1/prediction/";
@@ -58,17 +46,17 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "EACHLABS_KEY missing" }, { status: 401 });
       }
 
-      // Dosyaları erişilebilir URL’e çevir (hızlı çözüm: FAL storage)
+      // 1️⃣ Dosyaları Vercel Blob'a yükle
       const [humanUrl, garmentUrl] = await Promise.all([
-        uploadToFal(human, (human as any).name || "human.png"),
-        uploadToFal(garment, (garment as any).name || "garment.png"),
+        uploadPublicUrl(human, (human as any).name || "human.png"),
+        uploadPublicUrl(garment, (garment as any).name || "garment.png"),
       ]);
 
       const prompt =
         metaPrompt?.trim() ||
         "Realistic try-on; keep body pose, true color, clean e-commerce lighting.";
 
-      // 1) Prediction oluştur
+      // 2️⃣ Prediction oluştur
       const createRes = await fetch(EACHLABS_URL, {
         method: "POST",
         headers: {
@@ -83,7 +71,7 @@ export async function POST(req: Request) {
             num_images: 1,
             prompt,
             output_format: "jpeg",
-            sync_mode: false, // dokümana göre polling
+            sync_mode: false,
             aspect_ratio: "1:1",
             limit_generations: true,
           },
@@ -99,12 +87,12 @@ export async function POST(req: Request) {
         );
       }
 
-      // 2) Poll ile bekle
+      // 3️⃣ Sonucu bekle (poll)
       const id = createData.id;
       let resultData: any = null;
 
       for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 3000)); // 3 sn arayla
+        await new Promise((r) => setTimeout(r, 3000));
         const pollRes = await fetch(`${EACHLABS_URL}${id}`, {
           method: "GET",
           headers: { "X-API-Key": EACHLABS_KEY },
@@ -145,85 +133,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ image_url: imageUrl, id });
     }
 
-    // ========== 2) FAL / Nano-Banana (opsiyonel; istersen kullan) ==========
-    if (PROVIDER === "fal") {
-      if (!process.env.FAL_KEY) {
-        return NextResponse.json({ error: "FAL_KEY missing" }, { status: 401 });
-      }
-
-      const [humanUrl, garmentUrl] = await Promise.all([
-        uploadToFal(human, (human as any).name || "human.png"),
-        uploadToFal(garment, (garment as any).name || "garment.png"),
-      ]);
-
-      const prompt =
-        metaPrompt?.trim() ||
-        "Dress the person with the garment realistically; preserve body/pose; consistent lighting; e-commerce look.";
-
-      const out = await fal.subscribe("fal-ai/nano-banana/edit", {
-        input: { prompt, image_urls: [humanUrl, garmentUrl] },
-        logs: false,
-      });
-
-      const url =
-        (out as any)?.data?.images?.[0]?.url ||
-        (out as any)?.data?.image?.url ||
-        (out as any)?.images?.[0]?.url;
-
-      if (!url) {
-        return NextResponse.json(
-          { error: "No image from FAL nano-banana/edit", raw: out },
-          { status: 500 },
-        );
-      }
-      return NextResponse.json({ image_url: url });
-    }
-
-    // ========== 3) Harici Nano-Banana Proxy (multipart) ==========
-    if (PROVIDER === "nanobanana") {
-      const NB_BASE = process.env.NANOBANANA_API_URL || "https://api.nano-banana.example.com";
-      const NB_KEY = process.env.NANOBANANA_API_KEY || "";
-
-      if (!NB_BASE || !NB_KEY) {
-        return NextResponse.json(
-          { error: "NANOBANANA_API_URL or NANOBANANA_API_KEY missing" },
-          { status: 401 },
-        );
-      }
-
-      const fd = new FormData();
-      fd.append("human_image", human, (human as any).name || "human.png");
-      fd.append("garment_image", garment, (garment as any).name || "garment.png");
-      if (metaPrompt) fd.append("prompt", metaPrompt);
-
-      const res = await fetch(`${NB_BASE}/v1/try-on`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${NB_KEY}` },
-        body: fd,
-      });
-
-      if (!res.ok) {
-        const errJson = await safeJson(res);
-        const msg = errJson?.error || errJson?.message || `Nano-Banana error (${res.status})`;
-        return NextResponse.json({ error: msg, detail: errJson }, { status: res.status });
-      }
-
-      const data = await safeJson(res);
-      const imageUrl =
-        data?.image_url ||
-        data?.result?.url ||
-        data?.data?.image_url ||
-        data?.data?.image?.url;
-
-      if (!imageUrl) {
-        return NextResponse.json(
-          { error: "No image_url in Nano-Banana response", raw: data },
-          { status: 500 },
-        );
-      }
-      return NextResponse.json({ image_url: imageUrl });
-    }
-
+    // Eğer yanlış provider girildiyse:
     return NextResponse.json(
       { error: `Unknown TRYON_PROVIDER: ${PROVIDER}` },
       { status: 400 },
