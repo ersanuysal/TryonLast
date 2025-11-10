@@ -11,7 +11,6 @@ const PROVIDER = (process.env.TRYON_PROVIDER || "eachlabs").toLowerCase(); // de
 console.log("TRYON_PROVIDER at runtime:", process.env.TRYON_PROVIDER);
 console.log("EACHLABS_KEY exists:", !!process.env.EACHLABS_KEY);
 
-
 // ===== Yardımcılar =====
 async function safeJson(res: Response) {
   try {
@@ -26,6 +25,15 @@ async function uploadPublicUrl(file: File | Blob, filename = "upload.png") {
   const key = `uploads/${Date.now()}-${filename}`;
   const { url } = await put(key, file as any, { access: "public" });
   return url;
+}
+
+// Eachlabs header set
+function eachlabsHeaders(key: string) {
+  return {
+    Authorization: `Bearer ${key}`,
+    "X-API-Key": key,
+    "Content-Type": "application/json",
+  } as Record<string, string>;
 }
 
 // ===== Route =====
@@ -62,10 +70,7 @@ export async function POST(req: Request) {
       // 2️⃣ Prediction oluştur
       const createRes = await fetch(EACHLABS_URL, {
         method: "POST",
-        headers: {
-          "X-API-Key": EACHLABS_KEY,
-          "Content-Type": "application/json",
-        },
+        headers: eachlabsHeaders(EACHLABS_KEY),
         body: JSON.stringify({
           model: "nano-banana-edit",
           version: "0.0.1",
@@ -98,8 +103,23 @@ export async function POST(req: Request) {
         await new Promise((r) => setTimeout(r, 3000));
         const pollRes = await fetch(`${EACHLABS_URL}${id}`, {
           method: "GET",
-          headers: { "X-API-Key": EACHLABS_KEY },
+          headers: {
+            Authorization: `Bearer ${EACHLABS_KEY}`,
+            "X-API-Key": EACHLABS_KEY,
+          },
         });
+
+        // Yetkisiz/diğer hataları daha okunur ver
+        if (!pollRes.ok && pollRes.status !== 200) {
+          const errJson = await safeJson(pollRes);
+          if (pollRes.status === 401) {
+            return NextResponse.json(
+              { error: "Unauthorized (Eachlabs)", detail: errJson || null },
+              { status: 401 },
+            );
+          }
+        }
+
         const pollData = await pollRes.json();
 
         if (pollData?.status === "succeeded") {
@@ -149,4 +169,3 @@ export async function POST(req: Request) {
     );
   }
 }
-
