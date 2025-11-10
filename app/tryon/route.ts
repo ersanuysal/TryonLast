@@ -1,64 +1,107 @@
-import { NextRequest, NextResponse } from "next/server";
-import { fal } from "@fal-ai/client";
+import { NextResponse } from "next/server";
 
-// Next.js App Router server ayarları (Node runtime)
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+const EACHLABS_URL = "https://api.eachlabs.ai/v1/prediction/";
 
-// 1) ENV'den oku, 2) StackBlitz için geçici fallback (TESTTEN SONRA KEY'İ ROTATE ET!)
-const FAL_KEY =
-  process.env.FAL_KEY ||
-  ""; // <- çalışmıyorsa şimdilik buraya GEÇİCİ olarak anahtarını yaz, sonra sil ve rotate et.
-
-fal.config({ credentials: FAL_KEY });
-
-type Body = { human_image?: string; garment_image?: string };
-
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const { human_image, garment_image } = (await req.json()) as Body;
+    const body = await req.json();
+    const { model_image, garment_image, prompt } = body;
 
-    if (!human_image || !garment_image) {
-      return NextResponse.json(
-        { error: "Missing images: human_image & garment_image required" },
-        { status: 400 }
-      );
-    }
+    const EACHLABS_KEY = process.env.EACHLABS_KEY;
 
-    if (!FAL_KEY) {
+    if (!EACHLABS_KEY) {
       return NextResponse.json(
-        { error: "FAL_KEY missing. Set it in .env.local or add temporary fallback in route.ts" },
+        { error: "EACHLABS_KEY missing. Set it in .env.local" },
         { status: 401 }
       );
     }
 
-    const result = await fal.subscribe(
-      "fal-ai/kling/v1-5/kolors-virtual-try-on",
-      {
+    // 1️⃣ Yeni prediction oluştur
+    const createRes = await fetch(EACHLABS_URL, {
+      method: "POST",
+      headers: {
+        "X-API-Key": EACHLABS_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "nano-banana-edit",
+        version: "0.0.1",
         input: {
-          human_image_url: human_image,
-          garment_image_url: garment_image,
-          sync_mode: true,
+          image_urls: [model_image, garment_image],
+          num_images: 1,
+          prompt:
+            prompt ||
+            "Studio-quality AI fashion try-on. Maintain pose, realistic garment fit, true color, soft lighting.",
+          output_format: "jpeg",
+          sync_mode: false,
+          aspect_ratio: "1:1",
+          limit_generations: true,
         },
-        logs: true,
-      }
-    );
+        webhook_url: "",
+      }),
+    });
 
-    // Bazı sürümlerde result.data.image.url / result.image.url olabilir
-    const imageUrl =
-      (result as any)?.data?.image?.url ||
-      (result as any)?.image?.url ||
-      null;
+    const createData = await createRes.json();
 
-    if (!imageUrl) {
+    if (!createRes.ok) {
       return NextResponse.json(
-        { error: "No image returned from FAL", raw: result },
+        { error: "Prediction create failed", detail: createData },
+        { status: createRes.status }
+      );
+    }
+
+    const predictionId = createData?.id;
+    if (!predictionId) {
+      return NextResponse.json(
+        { error: "No prediction ID returned", raw: createData },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({ image_url: imageUrl });
+    // 2️⃣ Sonucu bekle (polling)
+    let resultData = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 3000)); // 3 sn arayla kontrol et
+      const pollRes = await fetch(`${EACHLABS_URL}${predictionId}`, {
+        method: "GET",
+        headers: {
+          "X-API-Key": EACHLABS_KEY,
+        },
+      });
+
+      const pollData = await pollRes.json();
+
+      if (pollData?.status === "succeeded") {
+        resultData = pollData;
+        break;
+      } else if (pollData?.status === "failed") {
+        return NextResponse.json(
+          { error: "Prediction failed", detail: pollData },
+          { status: 500 }
+        );
+      }
+    }
+
+    if (!resultData) {
+      return NextResponse.json(
+        { error: "Prediction timeout or no result" },
+        { status: 504 }
+      );
+    }
+
+    const imageUrl =
+      resultData?.output?.[0]?.url ||
+      resultData?.data?.output?.[0]?.url ||
+      null;
+
+    if (!imageUrl) {
+      return NextResponse.json(
+        { error: "No image URL found in result", raw: resultData },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({ image_url: imageUrl, id: predictionId });
   } catch (err: any) {
     console.error("tryon route error:", err?.message || err);
     return NextResponse.json(
