@@ -8,6 +8,9 @@ export const maxDuration = 60;
 
 // ===== Genel Ayarlar =====
 const PROVIDER = (process.env.TRYON_PROVIDER || "eachlabs").toLowerCase(); // default: eachlabs
+console.log("TRYON_PROVIDER at runtime:", process.env.TRYON_PROVIDER);
+console.log("EACHLABS_KEY exists:", !!process.env.EACHLABS_KEY);
+
 
 // ===== Yardımcılar =====
 async function safeJson(res: Response) {
@@ -146,3 +149,4 @@ export async function POST(req: Request) {
     );
   }
 }
+
