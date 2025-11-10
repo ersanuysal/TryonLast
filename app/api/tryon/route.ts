@@ -6,8 +6,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+/**
+ * Bu sürüm Eachlabs Nano-Banana API’sine göre güncellendi.
+ * Varsayılan PROVIDER artık "eachlabs".
+ * Görselleri URL’e çevirmek için mevcut FAL storage uploader kullanılıyor.
+ * (İstersen bunu Vercel Blob/S3 ile değiştirebilirsin.)
+ */
+
 // ===== Genel Ayarlar =====
-const PROVIDER = (process.env.TRYON_PROVIDER || "fal").toLowerCase(); // "fal" | "eachlabs" | "nanobanana"
+const PROVIDER = (process.env.TRYON_PROVIDER || "eachlabs").toLowerCase(); // "eachlabs" | "fal" | "nanobanana"
+
+// FAL storage upload için gerekli olabilir (only if used as uploader)
 fal.config({ credentials: process.env.FAL_KEY || "" });
 
 // ===== Yardımcılar =====
@@ -19,7 +28,7 @@ async function safeJson(res: Response) {
   }
 }
 
-// FAL storage'a dosya yükleyip erişilebilir URL döndürür
+// FAL storage'a dosya yükleyip erişilebilir URL döndürür (uploader olarak kullanıyoruz)
 async function uploadToFal(file: File | Blob, filename = "upload.png") {
   const wrapped =
     file instanceof File
@@ -40,49 +49,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing files" }, { status: 400 });
     }
 
-    // ========== 1) FAL / Nano-Banana (varsayılan) ==========
-    if (PROVIDER === "fal") {
-      if (!process.env.FAL_KEY) {
-        return NextResponse.json({ error: "FAL_KEY missing" }, { status: 401 });
-      }
-
-      // Dosyaları FAL storage'a yükle
-      const [humanUrl, garmentUrl] = await Promise.all([
-        uploadToFal(human, (human as any).name || "human.png"),
-        uploadToFal(garment, (garment as any).name || "garment.png"),
-      ]);
-
-      const prompt =
-        metaPrompt?.trim() ||
-        "Dress the person with the garment realistically; preserve body/pose; consistent lighting; e-commerce look.";
-
-      // Fal Nano-Banana edit (multi-image)
-      const out = await fal.subscribe("fal-ai/nano-banana/edit", {
-        input: {
-          prompt,
-          image_urls: [humanUrl, garmentUrl],
-          // num_images: 1,
-          // output_format: "jpeg",
-          // sync_mode: false,
-        },
-        logs: false,
-      });
-
-      const url =
-        (out as any)?.data?.images?.[0]?.url ||
-        (out as any)?.data?.image?.url ||
-        (out as any)?.images?.[0]?.url;
-
-      if (!url) {
-        return NextResponse.json(
-          { error: "No image from FAL nano-banana/edit", raw: out },
-          { status: 500 },
-        );
-      }
-      return NextResponse.json({ image_url: url });
-    }
-
-    // ========== 2) Eachlabs Nano-Banana (polling ile) ==========
+    // ========== 1) Eachlabs Nano-Banana (varsayılan) ==========
     if (PROVIDER === "eachlabs") {
       const EACHLABS_KEY = process.env.EACHLABS_KEY || "";
       const EACHLABS_URL = "https://api.eachlabs.ai/v1/prediction/";
@@ -91,7 +58,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "EACHLABS_KEY missing" }, { status: 401 });
       }
 
-      // Dosyaları URL'e çevir (hızlı çözüm: FAL storage)
+      // Dosyaları erişilebilir URL’e çevir (hızlı çözüm: FAL storage)
       const [humanUrl, garmentUrl] = await Promise.all([
         uploadToFal(human, (human as any).name || "human.png"),
         uploadToFal(garment, (garment as any).name || "garment.png"),
@@ -176,6 +143,40 @@ export async function POST(req: Request) {
       }
 
       return NextResponse.json({ image_url: imageUrl, id });
+    }
+
+    // ========== 2) FAL / Nano-Banana (opsiyonel; istersen kullan) ==========
+    if (PROVIDER === "fal") {
+      if (!process.env.FAL_KEY) {
+        return NextResponse.json({ error: "FAL_KEY missing" }, { status: 401 });
+      }
+
+      const [humanUrl, garmentUrl] = await Promise.all([
+        uploadToFal(human, (human as any).name || "human.png"),
+        uploadToFal(garment, (garment as any).name || "garment.png"),
+      ]);
+
+      const prompt =
+        metaPrompt?.trim() ||
+        "Dress the person with the garment realistically; preserve body/pose; consistent lighting; e-commerce look.";
+
+      const out = await fal.subscribe("fal-ai/nano-banana/edit", {
+        input: { prompt, image_urls: [humanUrl, garmentUrl] },
+        logs: false,
+      });
+
+      const url =
+        (out as any)?.data?.images?.[0]?.url ||
+        (out as any)?.data?.image?.url ||
+        (out as any)?.images?.[0]?.url;
+
+      if (!url) {
+        return NextResponse.json(
+          { error: "No image from FAL nano-banana/edit", raw: out },
+          { status: 500 },
+        );
+      }
+      return NextResponse.json({ image_url: url });
     }
 
     // ========== 3) Harici Nano-Banana Proxy (multipart) ==========
